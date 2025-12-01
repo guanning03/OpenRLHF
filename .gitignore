@@ -149,3 +149,7 @@ core
 *jianh*
 *test_scripts*
 */checkpoint/*
+
+results/
+arena-hard/
+wandb/

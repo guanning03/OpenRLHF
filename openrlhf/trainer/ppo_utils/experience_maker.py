@@ -421,6 +421,46 @@ class SamplesGenerator:
 
         return samples_list
 
+def compute_jspo_stats_from_matrix(
+    scores_matrix: torch.Tensor,
+    epsilon: float = 1e-6,
+) -> Tuple[float, float, float]:
+    """
+    输入:
+        scores_matrix: shape (n_groups, m_per_group)
+            每一行是一个 group 中的 m 个 rollout 的标量 reward
+
+    返回:
+        v_square: float  # 对应 mean_of_group_vars
+        s_square: float  # 对应 var_of_group_means
+        js_lambda: float
+    """
+    assert scores_matrix.dim() == 2, "scores_matrix 必须是 2D (n_groups, m)"
+    n_groups, m = scores_matrix.shape
+    
+    # # 打印完整的 scores_matrix（不带省略号）
+    # torch.set_printoptions(threshold=torch.inf, linewidth=200)
+    # print(f"\n=== 完整的 scores_matrix (shape: {scores_matrix.shape}) ===")
+    # print(scores_matrix)
+    # print("=" * 60 + "\n")
+    # torch.set_printoptions(profile="default")
+
+    device = scores_matrix.device
+    dtype = scores_matrix.dtype
+    eps = torch.as_tensor(epsilon, dtype=dtype, device=device)
+
+    # 每个 group 的均值和方差（沿 dim=1）
+    group_means = scores_matrix.mean(dim=1)                # (n_groups,)
+    group_vars  = scores_matrix.var(dim=1, unbiased=False) # (n_groups,)
+
+    # 对应你原代码里的 mean_of_group_vars / var_of_group_means
+    v_square = group_vars.mean() / (m - 1)                 # 1) 组内方差的平均值再除以 (m-1)
+    s_square = group_means.var(unbiased=False).clamp_min(eps)  # 3) 组均值的方差
+
+    js_lambda = v_square / (v_square + s_square + eps)
+
+    # 返回 Python float
+    return float(v_square.item()), float(s_square.item()), float(js_lambda.item())
 
 class RemoteExperienceMaker(ABC):
     def __init__(
@@ -703,6 +743,26 @@ class RemoteExperienceMaker(ABC):
         rewards[indices] = raw_rewards  # sorted
 
         rewards = rewards.reshape(-1, args.n_samples_per_prompt)
+        
+        if args.n_samples_per_prompt > 1:
+            v_square, s_square, js_lambda = compute_jspo_stats_from_matrix(rewards)
+            print(f"v_square: {v_square}, s_square: {s_square}, js_lambda: {js_lambda}")
+            
+            # Store jspo stats in each experience's info for logging
+            jspo_v_square_tensor = torch.full((len(raw_rewards),), v_square)
+            jspo_s_square_tensor = torch.full((len(raw_rewards),), s_square)
+            jspo_lambda_tensor = torch.full((len(raw_rewards),), js_lambda)
+            
+            jspo_v_square_list = jspo_v_square_tensor[indices].split(exp_len)
+            jspo_s_square_list = jspo_s_square_tensor[indices].split(exp_len)
+            jspo_lambda_list = jspo_lambda_tensor[indices].split(exp_len)
+            
+            for experience, v_sq, s_sq, js_lam in zip(experiences, jspo_v_square_list, jspo_s_square_list, jspo_lambda_list):
+                experience.info["v_square"] = v_sq
+                experience.info["s_square"] = s_sq
+                experience.info["js_lambda"] = js_lam
+        else:
+            js_lambda = 0.0
 
         # log group reward std
         if args.n_samples_per_prompt > 1:
@@ -720,6 +780,9 @@ class RemoteExperienceMaker(ABC):
             # REINFORCE++-baseline and Dr. GRPO removed the `/std` in GRPO as `/ std` is not needed in RL variance reduction theory.
             # And `k3 KL` has a larger variance than `k1 KL` under a categorical distribution.
             rewards = rewards - rewards.mean(-1, keepdim=True)
+        elif args.advantage_estimator == "jspo":
+            baseline = (1 - js_lambda) * rewards.mean(-1, keepdim=True) + js_lambda * rewards.mean()
+            rewards = rewards - baseline
         elif args.advantage_estimator == "group_norm":
             rewards = (rewards - rewards.mean(-1, keepdim=True)) / (rewards.std(-1, keepdim=True) + 1e-9)
 
@@ -743,14 +806,15 @@ class RemoteExperienceMaker(ABC):
                     args.gamma,
                     args.lambd,
                 )
-            elif self.advantage_estimator in ["reinforce", "rloo", "reinforce_baseline", "group_norm", "dr_grpo"]:
+            elif self.advantage_estimator in ["reinforce", "rloo", "reinforce_baseline", "group_norm", "dr_grpo", "jspo"]:
                 if args.gamma != 1.0 and self.advantage_estimator in [
                     "rloo",
                     "reinforce_baseline",
                     "group_norm",
                     "dr_grpo",
+                    "jspo",
                 ]:
-                    logger.warning("gamma is set to 1.0 for rloo, reinforce_baseline, and group_norm")
+                    logger.warning("gamma is set to 1.0 for rloo, reinforce_baseline, jspo and group_norm")
                     args.gamma = 1.0
 
                 experience.returns = self.get_cumulative_returns(

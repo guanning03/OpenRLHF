@@ -18,7 +18,8 @@ from openrlhf.utils import get_strategy
 def train(args):
     # initialize ray if not initialized
     if not ray.is_initialized():
-        ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}})
+        ray.init(num_cpus=16,
+                 runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}})
 
     # configure strategy
     strategy = get_strategy(args)
@@ -383,9 +384,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--advantage_estimator",
         type=str,
-        choices=["gae", "reinforce", "rloo", "reinforce_baseline", "group_norm", "dr_grpo"],
+        choices=["gae", "reinforce", "rloo", "reinforce_baseline", "group_norm", "dr_grpo", "jspo"],
         default="gae",
-        help="Choose advantage estimation method: gae, reinforce, rloo, reinforce_baseline, group_norm, dr_grpo",
+        help="Choose advantage estimation method: gae, reinforce, rloo, reinforce_baseline, group_norm, dr_grpo, jspo   ",
     )
     parser.add_argument("--use_kl_loss", action="store_true", default=False, help="whether to use KL loss from GRPO")
     parser.add_argument(
@@ -485,7 +486,7 @@ if __name__ == "__main__":
         else:
             args.critic_pretrain = args.pretrain
 
-    if args.advantage_estimator in ["rloo", "reinforce_baseline", "group_norm"]:
+    if args.advantage_estimator in ["rloo", "reinforce_baseline", "group_norm", "jspo"]:
         assert args.n_samples_per_prompt > 1, f"{args.advantage_estimator} requires n_samples_per_prompt > 1"
 
     if args.remote_rm_url:
